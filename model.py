@@ -16,25 +16,45 @@ import numpy as np
 import pandas as pd
 from sklearn.utils.extmath import cartesian
 import math
+from numpy.random import seed
+from tensorflow.keras.utils import to_categorical
+from collections import Counter
+import gc
 
-epochs_ = 10000
+epochs_ = 1000
 batch_size_ = 32
-model_number = 1
-filepath = '/workspace/data/code_j/m1a1e10000b32_haus/'
-# In[283]:
+# filepath = '/workspace/data/code_j/m3a1e1000b32seed5_baseunet_1/'
+# histpath = '/workspace/data/code_j/m3a1e1000b32seed5_baseunet_1.xlsx'
+
+
+
+def setseed(seedn):
+    seed(seedn)
+    tf.random.set_seed(seedn)
+    tf.keras.utils.set_random_seed(seedn)
+    os.environ['PYTHONHASHSEED'] = str(seedn)
+    # tf.config.experimental.enable_op_determinism()
+    # os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    # os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+
+# setseed(5)
+
+
+# weights = [1/3,1/3,1/3] 
+#weights = [1/2,1/4,1/4]
+#weights = [1/4,1/2,1/4]
+#weights = [1/4,1/4,1/2]
+weights = [1,1,1]
+
+
 
 #unet variants :  https://arxiv.org/ftp/arxiv/papers/2011/2011.01118.pdf
 
 # In[284]:
 
-
 ########################################################################################################################
 ####################################           KeyVars           #######################################################
 ########################################################################################################################
-
-
-# In[285]:
-
 
 subdir = ["benign_image/", "benign_mask/", "malignant_image/",
           "malignant_mask/", "normal_image/", "normal_mask/"]
@@ -46,12 +66,6 @@ dataset = ['/workspace/data/code_j/dataset/',
 ########################################################################################################################
 ####################################        train_test_valid      ######################################################
 ########################################################################################################################
-
-
-# In[121]:
-
-
-from tensorflow.keras.utils import to_categorical
 
 train_test_valid = [[[], [], []], [[], [], []], [[], [], []]]
 
@@ -82,7 +96,6 @@ X_train, y_train, y_train2 = shuffle(X_train, y_train, y_train2, random_state=5)
 X_test, y_test, y_test2 = shuffle(X_test, y_test, y_test2, random_state=5)
 X_valid, y_valid, y_valid2 = shuffle(X_valid, y_valid, y_valid2, random_state=5)
 
-from collections import Counter
 print(Counter(y_train2.tolist()))
 print(Counter(y_test2.tolist()))
 print(Counter(y_valid2.tolist()))
@@ -114,17 +127,13 @@ y_valid_contour=(np.array(create_contours((y_valid*255).astype(np.uint8))[1])/25
 
 # In[127]:
 
-
 ########################################################################################################################
 ####################################         UNET MODEL          #######################################################
 ########################################################################################################################
 
+def improvised_unet_build():
 
-# In[128]:
-
-def UNET():
     def conv_block(input_, num_filters):
-
         conv2D_1 = Conv2D(filters=num_filters, kernel_size=3,
                         kernel_initializer='he_normal', padding="same")(input_)
         batch1 = BatchNormalization()(conv2D_1)
@@ -133,7 +142,6 @@ def UNET():
                         kernel_initializer='he_normal', padding="same")(act1)
         batch2 = BatchNormalization()(conv2D_2)
         act2 = Activation("relu")(batch2)
-
         return act2
 
     def encoder_block(input_, num_filters):
@@ -150,133 +158,161 @@ def UNET():
         x = conv_block(x, num_filters)
         return x
 
-    def unet_build():
-        inputs = Input((256,256,3))
-
-        conv1, pool1 = encoder_block(inputs, 16)
-        conv2, pool2 = encoder_block(pool1, 32)
-        conv3, pool3 = encoder_block(pool2, 64)
-        conv4, pool4 = encoder_block(pool3, 128)
-
-        bridge = conv_block(pool4, 256)
-
-        decoder_1 = decoder_block(bridge, conv4, 128)
-        decoder_2 = decoder_block(decoder_1, conv3, 64)
-        decoder_3 = decoder_block(decoder_2, conv2, 32)
-        decoder_4 = decoder_block(decoder_3, conv1, 16)
-
-        outputs = Conv2D(1, (1, 1), padding="same",
-                        activation="sigmoid")(decoder_4)
-
-        model = Model(inputs, outputs, name="U-Net")
-        return model
-
-    def improvised_unet_build():
-
-        inputs = Input((256,256,3))
-
-        conv1, pool1 = encoder_block(inputs, 16)
-        conv2, pool2 = encoder_block(pool1, 32)
-        conv3, pool3 = encoder_block(pool2, 64)
-        conv4, pool4 = encoder_block(pool3, 128)
-
-        bridge = conv_block(pool4, 256)
-
-        decoder_1 = decoder_block(bridge, conv4, 128)
-        decoder_2 = decoder_block(decoder_1, conv3, 64)
-        decoder_3 = decoder_block(decoder_2, conv2, 32)
-
-        x = Conv2DTranspose(filters=16, kernel_size=(
-            2, 2), strides=2, padding="same")(decoder_3)
-        x = Concatenate()([x, conv1])
-        x = Dropout(0.4)(x)
-
-        x1 = conv_block(x, 16)
+    def b1(input_,num_filters):
+        x1 = conv_block(input_, num_filters)
         y1_output = Conv2D(1, 1, padding="same",
                         activation="sigmoid", name='grayscale')(x1)
+        return y1_output
 
-        x2 = conv_block(x, 16)
+    def b2(input_,num_filters):
+        x2 = conv_block(input_, num_filters)
         y2_output = Conv2D(3, 1, padding="same",
                         activation="sigmoid", name='colour')(x2)
+        return y2_output
 
+    def b3(input_,num_filters):
+
+        pool1 = MaxPool2D((2, 2))(input_)
+        pool2 = MaxPool2D((2, 2))(pool1)
+        pool3 = MaxPool2D((2, 2))(pool2)
+
+        conv2D_1 = Conv2D(filters=num_filters, kernel_size=3,
+            kernel_initializer='he_normal', padding="same")(pool3)
+        batch1 = BatchNormalization()(conv2D_1)
+        act1 = Activation("relu")(batch1)
+
+        glb = GlobalAveragePooling2D(name='avg_pool')(act1)
+        dense1 = Dense(1000, activation='relu')(glb)
+        dense2 = Dense(3)(dense1)
+        y3_output = tf.keras.layers.Activation('softmax', name='classifier')(dense2)
+        return y3_output
+
+    inputs = Input((256,256,3))
+
+    conv1, pool1 = encoder_block(inputs, 16)
+    conv2, pool2 = encoder_block(pool1, 32)
+    conv3, pool3 = encoder_block(pool2, 64)
+    conv4, pool4 = encoder_block(pool3, 128)
+
+    bridge = conv_block(pool4, 256)
+
+    decoder_1 = decoder_block(bridge, conv4, 128)
+    decoder_2 = decoder_block(decoder_1, conv3, 64)
+    decoder_3 = decoder_block(decoder_2, conv2, 32)
+
+    x = Conv2DTranspose(filters=16, kernel_size=(
+        2, 2), strides=2, padding="same")(decoder_3)
+    x = Concatenate()([x, conv1])
+    x = Dropout(0.4)(x)
+
+
+    branch1 = b1(x,16)
+
+    # if b2 is needed , uncomment b2; 
+    # if b3 is needed , uncomment b3; 
+    # if both are needed , uncomment both; 
+
+    branch2 = b2(x,16)
+    branch3 = b3(x,32)
+
+    # model = Model(inputs=inputs, outputs=[branch1,], name="Improvised_UNet")
+    # model = Model(inputs=inputs, outputs=[branch1,branch2], name="Improvised_UNet")
+    # model = Model(inputs=inputs, outputs=[branch1,branch3], name="Improvised_UNet")
+    model = Model(inputs=inputs, outputs=[branch1, branch2, branch3], name="Improvised_UNet")
+    return model
+
+
+def Imp_attnUNet():
+    #https://www.kaggle.com/code/chaitanyasriarimanda/brainmri-image-segmentation-attention-unet/notebook
+    def conv_block(inp,filters):
+        x=Conv2D(filters,(3,3),padding='same',activation='relu')(inp)
+        x=Conv2D(filters,(3,3),padding='same')(x)
+        x=BatchNormalization(axis=3)(x)
+        x=Activation('relu')(x)
+        return x
+
+    def encoder_block(inp,filters):
+        x=conv_block(inp,filters)
+        p=MaxPooling2D(pool_size=(2,2))(x)
+        return x,p
+
+    def attention_block(l_layer,h_layer): #Attention Block
+        phi=Conv2D(h_layer.shape[-1],(1,1),padding='same')(l_layer)
+        theta=Conv2D(h_layer.shape[-1],(1,1),strides=(2,2),padding='same')(h_layer)
+        x=add([phi,theta])
+        x=Activation('relu')(x)
+        x=Conv2D(1,(1,1),padding='same',activation='sigmoid')(x)
+        x=UpSampling2D(size=(2,2))(x)
+        x=multiply([h_layer,x])
+        x=BatchNormalization(axis=3)(x)
+        return x
         
-        x3 = conv_block(x, 16)
-        
-        # MAXPOOLING HERE (256,256,32 ) -> (128,128,32)
-        # MAXPOOLING HERE (128,128,32) -> (64,64,32)
-        # MAXPOOLING HERE (64,64,32) -> (32,32,32)
-        # CONV LAYER (32,32,32)
-        # (GLOBAL AVG POOLING) (1,1,32)
-        # FCN
+    def decoder_block(inp,filters,concat_layer):
+        x=Conv2DTranspose(filters,(2,2),strides=(2,2),padding='same')(inp)
+        concat_layer=attention_block(inp,concat_layer)
+        x=concatenate([x,concat_layer])
+        x=conv_block(x,filters)
+        return x 
 
-        y3_gray = Conv2D(1, 1, padding="same",
-                        activation="sigmoid")(x3)
-        a = Flatten()(y3_gray)
-        b = Dense(1500, activation='relu')(a)
-        y3_output = Dense(3, name='classifier')(b)
-        # y3_output = Dense(2, name='classifier')(b)
+    def b1(input_,num_filters):
+        x1 = conv_block(input_, num_filters)
+        y1_output = Conv2D(1, 1, padding="same",
+                        activation="sigmoid", name='grayscale')(x1)
+        return y1_output
 
-        x4 = conv_block(x, 16)
-        y4_output = Conv2D(1, 1, padding="same",
-                        activation="sigmoid", name='contour')(x4)
+    def b2(input_,num_filters):
+        x2 = conv_block(input_, num_filters)
+        y2_output = Conv2D(3, 1, padding="same",
+                        activation="sigmoid", name='colour')(x2)
+        return y2_output
 
-        # model = Model(inputs=inputs, outputs=[y1_output, y2_output], name="U-Net")
-        # model = Model(inputs=inputs, outputs=[y1_output, y2_output, y3_output], name="Improvised_UNet")
-        model = Model(inputs=inputs, outputs=[y1_output, y2_output, y3_output, y4_output], name="Improvised_UNet")
-        return model
+    def b3(input_,num_filters):
 
-    if(model_number==0):
-        return unet_build()
-    
-    return improvised_unet_build()
+        pool1 = MaxPool2D((2, 2))(input_)
+        pool2 = MaxPool2D((2, 2))(pool1)
+        pool3 = MaxPool2D((2, 2))(pool2)
 
+        conv2D_1 = Conv2D(filters=num_filters, kernel_size=3,
+            kernel_initializer='he_normal', padding="same")(pool3)
+        batch1 = BatchNormalization()(conv2D_1)
+        act1 = Activation("relu")(batch1)
 
-def attnUNet():
-  #https://www.kaggle.com/code/chaitanyasriarimanda/brainmri-image-segmentation-attention-unet/notebook
-  def conv_block(inp,filters):
-      x=Conv2D(filters,(3,3),padding='same',activation='relu')(inp)
-      x=Conv2D(filters,(3,3),padding='same')(x)
-      x=BatchNormalization(axis=3)(x)
-      x=Activation('relu')(x)
-      return x
+        glb = GlobalAveragePooling2D(name='avg_pool')(act1)
+        dense1 = Dense(1000, activation='relu')(glb)
+        dense2 = Dense(3)(dense1)
+        y3_output = tf.keras.layers.Activation('softmax', name='classifier')(dense2)
+        return y3_output
 
-  def encoder_block(inp,filters):
-      x=conv_block(inp,filters)
-      p=MaxPooling2D(pool_size=(2,2))(x)
-      return x,p
+    inputs=Input((256,256,3))
+    d1,p1=encoder_block(inputs,64)
+    d2,p2=encoder_block(p1,128)
+    d3,p3=encoder_block(p2,256)
+    d4,p4=encoder_block(p3,512)
+    bridge=conv_block(p4,1024)
+    e2=decoder_block(bridge,512,d4)
+    e3=decoder_block(e2,256,d3)
+    e4=decoder_block(e3,128,d2)
+    # e5=decoder_block(e4,64,d1)
 
-  def attention_block(l_layer,h_layer): #Attention Block
-      phi=Conv2D(h_layer.shape[-1],(1,1),padding='same')(l_layer)
-      theta=Conv2D(h_layer.shape[-1],(1,1),strides=(2,2),padding='same')(h_layer)
-      x=add([phi,theta])
-      x=Activation('relu')(x)
-      x=Conv2D(1,(1,1),padding='same',activation='sigmoid')(x)
-      x=UpSampling2D(size=(2,2))(x)
-      x=multiply([h_layer,x])
-      x=BatchNormalization(axis=3)(x)
-      return x
-      
-  def decoder_block(inp,filters,concat_layer):
-      x=Conv2DTranspose(filters,(2,2),strides=(2,2),padding='same')(inp)
-      concat_layer=attention_block(inp,concat_layer)
-      x=concatenate([x,concat_layer])
-      x=conv_block(x,filters)
-      return x 
+    x=Conv2DTranspose(64,(2,2),strides=(2,2),padding='same')(e4)
+    concat_layer=attention_block(e4,d1)
+    x=concatenate([x,concat_layer])
 
-  inputs=Input((256,256,3))
-  d1,p1=encoder_block(inputs,64)
-  d2,p2=encoder_block(p1,128)
-  d3,p3=encoder_block(p2,256)
-  d4,p4=encoder_block(p3,512)
-  b1=conv_block(p4,1024)
-  e2=decoder_block(b1,512,d4)
-  e3=decoder_block(e2,256,d3)
-  e4=decoder_block(e3,128,d2)
-  e5=decoder_block(e4,64,d1)
-  outputs = Conv2D(1, (1,1),activation="sigmoid")(e5)
-  model=Model(inputs=[inputs], outputs=[outputs],name='AttnetionUnet')
+    # outputs = Conv2D(1, (1,1),activation="sigmoid")(e5)
+    # model=Model(inputs=[inputs], outputs=[outputs],name='AttnetionUnet')
 
-  return model
+    branch1 = b1(x,64)
+
+    # if b2 is needed , uncomment b2; 
+    # if b3 is needed , uncomment b3; 
+    # if both are needed , uncomment both; 
+
+    branch2 = b2(x,64)
+    branch3 = b3(x,32)
+
+    model = Model(inputs=inputs, outputs=[branch1, branch2, branch3], name="Improvised_Attn_UNet")
+
+    return model
 
 
 def ResUNet():
@@ -363,16 +399,16 @@ def PSPNet():
                         padding='same',kernel_initializer='he_normal',name=b+'a')(X)
         X = BatchNormalization(name=b+'batch_norm_a')(X)
         X = LeakyReLU(alpha=0.2,name=b+'leakyrelu_a')(X)
-        # block_b
-        X = Convolution2D(filters=f2,kernel_size=(3,3),dilation_rate=(2,2),
-                        padding='same',kernel_initializer='he_normal',name=b+'b')(X)
-        X = BatchNormalization(name=b+'batch_norm_b')(X)
-        X = LeakyReLU(alpha=0.2,name=b+'leakyrelu_b')(X)
-        # block_c
+        # # block_b
+        # X = Convolution2D(filters=f2,kernel_size=(3,3),dilation_rate=(2,2),
+        #                 padding='same',kernel_initializer='he_normal',name=b+'b')(X)
+        # X = BatchNormalization(name=b+'batch_norm_b')(X)
+        # X = LeakyReLU(alpha=0.2,name=b+'leakyrelu_b')(X)
+       # block_c
         X = Convolution2D(filters=f3,kernel_size=(1,1),dilation_rate=(1,1),
                         padding='same',kernel_initializer='he_normal',name=b+'c')(X)
         X = BatchNormalization(name=b+'batch_norm_c')(X)
-        # skip_conv
+        #skip_conv
         X_skip = Convolution2D(filters=f3,kernel_size=(3,3),padding='same',name=b+'skip_conv')(X_skip)
         X_skip = BatchNormalization(name=b+'batch_norm_skip_conv')(X_skip)
         # block_c + skip_conv
@@ -382,45 +418,43 @@ def PSPNet():
     
     def base_feature_maps(input_layer):
         # base covolution module to get input image feature maps 
-        
         # block_1
         base = conv_block(input_layer,[32,32,64],'1')
-        # block_2
+        # # block_2
         base = conv_block(base,[64,64,128],'2')
-        # block_3
+        # # block_3
         base = conv_block(base,[128,128,256],'3')
         return base
 
     def pyramid_feature_maps(input_layer):
         # pyramid pooling module
-        
         base = base_feature_maps(input_layer)
         # black
         black = GlobalAveragePooling2D(name='black_pool')(base)
-        black = tensorflow.keras.layers.Reshape((1,1,256))(black)
+        black = tf.keras.layers.Reshape((1,1,256))(black)
         black = Conv2D(filters=64,kernel_size=(1,1),name='black_1_by_1')(black)
         black = UpSampling2D(size=256,interpolation='bilinear',name='black_upsampling')(black)
         # white
         white = AveragePooling2D(pool_size=(2,2),name='white_pool')(base)
         white = Conv2D(filters=64,kernel_size=(1,1),name='white_1_by_1')(white)
         white = UpSampling2D(size=2,interpolation='bilinear',name='white_upsampling')(white)
-        # base + black + white + blue + green
+        # base + black + white
         return concatenate([base,black,white])
 
-    def last_conv_module(input_layer):
+    def last_conv_module():
         inputs = Input((256, 256, 3))
         X = pyramid_feature_maps(inputs)
         X = Convolution2D(filters=3,kernel_size=3,padding='same',name='last_conv_3_by_3')(X)
         X = BatchNormalization(name='last_conv_3_by_3_batch_norm')(X)
         X = Activation('sigmoid' ,name='last_conv_relu')(X)
+        X = Conv2D(1, (1, 1), activation='sigmoid')(X)
         # X = Flatten(name='last_conv_flatten')(X)
-        return X
+        model = Model(inputs=inputs, outputs=X, name="PSPNet")
+        return model
     return last_conv_module()
 
 
-
 def InceptionUNet():
-
     #https://github.com/mribrahim/inception-unet/blob/master/unetV2.py
     
     def block(prevlayer, a, b, pooling):
@@ -507,12 +541,13 @@ def InceptionUNet():
         return model
 
     return get_unet_plus_inception()
+
 ########################################################################################################################
 ####################################        LOSS FUNCTIONS         #####################################################
 ########################################################################################################################
 
 
-def DiceAccuracy(targets, inputs, smooth=1e-6):
+def DiceAccuracy(targets, inputs, smooth=1):
     inputs = keras.flatten(inputs)
     targets = keras.flatten(targets)
     intersection = keras.sum(targets*inputs)
@@ -520,14 +555,27 @@ def DiceAccuracy(targets, inputs, smooth=1e-6):
         (keras.sum(targets) + keras.sum(inputs) + smooth)
     return dice
 
-def dice_loss(y_true, y_pblack):
-    return 1-DiceAccuracy(y_true, y_pblack)
+def dice_loss(y_true, y_pred):
+    return weights[0]*(1-DiceAccuracy(y_true, y_pred))
+
+def DiceCoeff(y_true, y_pred, smooth=1e-6):
+    y_true_f = keras.flatten(y_true)
+    y_pred_f = keras.cast(keras.greater(keras.flatten(y_pred), 0.5), 'float32')
+    intersection = y_true_f * y_pred_f
+    score = (2. * keras.sum(intersection) + smooth) / (keras.sum(y_true_f) + keras.sum(y_pred_f) + smooth)
+    return score
 
 def mse_loss(imageA, imageB):
-    return keras.sum((imageA - imageB) ** 2)/(256 * 256)
+    size_ = tf.size(imageA)
+    return weights[1]*(keras.sum((imageA - imageB) ** 2)/ tf.cast(size_, tf.float32))
 
-def weighted_hausdorff_distance(y_true, y_pblack):
-    w= 256
+
+def cce_loss(y_true,y_pred):
+    cce = tf.keras.losses.CategoricalCrossentropy()
+    return weights[2]*cce(y_true,y_pred)/16.118095
+
+def weighted_hausdorff_distance(y_true, y_pred):
+    w=256
     h=256
     alpha=1
 
@@ -547,14 +595,14 @@ def weighted_hausdorff_distance(y_true, y_pblack):
     all_img_locations = tf.convert_to_tensor(cartesian([np.arange(w), np.arange(h)]), dtype=tf.float32)
     max_dist = math.sqrt(w ** 2 + h ** 2)
 
-    def hausdorff_loss(y_true, y_pblack):
-        def loss(y_true, y_pblack):
+    def hausdorff_loss(y_true, y_pred):
+        def loss(y_true, y_pred):
             eps = 1e-6
             y_true = keras.reshape(y_true, [w, h])
             gt_points = keras.cast(tf.where(y_true > 0.5), dtype=tf.float32)
             num_gt_points = tf.shape(gt_points)[0]
-            y_pblack = keras.flatten(y_pblack)
-            p = y_pblack
+            y_pred = keras.flatten(y_pred)
+            p = y_pred
             p_replicated = tf.squeeze(keras.repeat(tf.expand_dims(p, axis=-1), num_gt_points))
             d_matrix = cdist(all_img_locations, gt_points)
             num_est_pts = tf.blackuce_sum(p)
@@ -569,128 +617,223 @@ def weighted_hausdorff_distance(y_true, y_pblack):
 
             term_2 = keras.mean(d_div_p, axis=0)
 
-            x=tf.cast(tf.math.count_nonzero(y_pblack)/(255*255),tf.float32)
+            x=tf.cast(tf.math.count_nonzero(y_pred)/(255*255),tf.float32)
             term_2 = tf.where(tf.math.is_nan(term_2), x, term_2)
 
             return term_1 + term_2
 
         batched_losses = tf.map_fn(lambda x:
                                    loss(x[0], x[1]),
-                                   (y_true, y_pblack),
+                                   (y_true, y_pred),
                                    dtype=tf.float32)
         return keras.mean(tf.stack(batched_losses))
 
-    return hausdorff_loss(y_true, y_pblack)
+    return hausdorff_loss(y_true, y_pred)
+
+# def lr_scheduler(epoch, lr):
+#     return 4*0.001 * math.pow(0.75, math.floor(epoch/200))
+
+# PSPNet_model = PSPNet()
+# PSPNet_model.summary()
+# callbacks = [ModelCheckpoint(
+#     filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+# PSPNet_model.compile(
+#     optimizer='adam',
+#     loss=dice_loss,
+#     metrics=[DiceAccuracy]
+# )
+# history = PSPNet_model.fit(X_train, y_train, batch_size=batch_size_,
+#                             epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
 
 
-if(model_number==0):
+# for i in [9]:
+#     setseed(i)
+#     folder_name = '/workspace/data/op2/m3a1e1000b32seed'+str(i)+'_InceptionUNet'
+#     if os.path.exists(folder_name):
+#         shutil.rmtree(folder_name)
+#     os.makedirs(folder_name)
 
-    InceptionUNet_model = InceptionUNet()
-    callbacks = [ModelCheckpoint(
-      filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
-    InceptionUNet_model.compile(
-        optimizer='adam',
-        loss=dice_loss,
-        metrics=[DiceAccuracy]
-    )
-    history = InceptionUNet_model.fit(X_train, y_train, batch_size=batch_size_,
-                                epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
+#     InceptionUNet_model = InceptionUNet()
 
-    # ResUNet_model = ResUNet()
-    # callbacks = [ModelCheckpoint(
-    #   filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
-    # ResUNet_model.compile(
-    #     optimizer='adam',
-    #     loss='binary_crossentropy',
-    #     metrics=[DiceAccuracy]
-    # )
-    # history = ResUNet_model.fit(X_train, y_train, batch_size=batch_size_,
-    #                             epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
+#     filepath = folder_name+'/m3a1e1000b32seed'+str(i)+'_InceptionUNet/'
+#     histpath = folder_name+'/m3a1e1000b32seed'+str(i)+'_InceptionUNet.xlsx'
 
-    # AUNet = attnUNet()
-    # callbacks = [ModelCheckpoint(
-    #   filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
-    # AUNet.compile(
-    #     optimizer='adam',
-    #     loss=dice_loss,
-    #     metrics=[DiceAccuracy]
-    # )
-    # history = AUNet.fit(X_train, y_train, batch_size=batch_size_,
-    #                         epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
+#     callbacks = [ModelCheckpoint(
+#         filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+#     InceptionUNet_model.compile(
+#         optimizer='adam',
+#         loss=dice_loss,
+#         metrics=[DiceAccuracy]
+#     )
+#     history = InceptionUNet_model.fit(X_train, y_train, batch_size=batch_size_,
+#                             epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
 
-    # input_shape = (256, 256, 3)
-    # unet_model = unet_build(input_shape)
-    # unet_model.summary()
+#     del InceptionUNet_model
+#     keras.clear_session()
+#     gc.collect()
 
-    # unet_model.compile(
-    # optimizer='adam', loss=dice_loss, metrics=[DiceAccuracy])
+#     hist = pd.DataFrame(history.history)
+#     hist.to_excel(histpath)
 
-    # callbacks = [ModelCheckpoint(
-    # filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
 
-    # history = unet_model.fit(X_train, y_train, batch_size=batch_size_,
-    #                         epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
+# ResUNet_model = ResUNet()
+# callbacks = [ModelCheckpoint(
+#   filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+# ResUNet_model.compile(
+#     optimizer='adam',
+#     loss='binary_crossentropy',
+#     metrics=[DiceAccuracy]
+# )
+# history = ResUNet_model.fit(X_train, y_train, batch_size=batch_size_,
+#                             epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
 
-else:
-    improvised_unet_model = UNET()
-    improvised_unet_model.summary()
+# AUNet = attnUNet()
+# callbacks = [ModelCheckpoint(
+#   filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+# AUNet.compile(
+#     optimizer='adam',
+#     loss=dice_loss,
+#     metrics=[DiceAccuracy]
+# )
+# history = AUNet.fit(X_train, y_train, batch_size=batch_size_,
+#                         epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
 
-    # improvised_unet_model.compile(
-    #                             optimizer='adam',
-    #                             loss={'grayscale': dice_loss,
-    #                                 'colour': mse_loss,
-    #                                 },
-    #                             metrics={'grayscale': DiceAccuracy,
-    #                                     'colour': ['accuracy'],
-    #                                     },
-    #                             )
 
-    # improvised_unet_model.compile(
-    #                         optimizer='adam',
-    #                         loss={'grayscale': dice_loss,
-    #                             'colour': mse_loss,
-    #                             'classifier': tf.keras.losses.CategoricalCrossentropy(from_logits=True),
-    #                             'contour': dice_loss,
-    #                             },
-    #                         metrics={'grayscale': DiceAccuracy,
-    #                                 'colour': ['accuracy'],
-    #                                 'classifier': ['accuracy'],
-    #                                 'contour': DiceAccuracy,
-    #                                 },
-    #                         )
+# b1 only :
 
-    improvised_unet_model.compile(
-                            optimizer='adam',
-                            loss={'grayscale': dice_loss,
-                                'colour': mse_loss,
-                                'classifier': tf.keras.losses.CategoricalCrossentropy(from_logits=True),
-                                'contour': weighted_hausdorff_distance,
-                                },
-                            metrics={'grayscale': DiceAccuracy,
-                                    'colour': ['accuracy'],
-                                    'classifier': ['accuracy'],
-                                    'contour': DiceAccuracy,
-                                    },
-                            )
+# for i in range(2):
+#     setseed(5)
+
+#     if(i==0):
+#         filepath = '/workspace/data/code_j/trial1/'
+#         histpath = '/workspace/data/code_j/trial1.xlsx'
+#     if(i==1):
+#         filepath = '/workspace/data/code_j/trial2/'
+#         histpath = '/workspace/data/code_j/trial2.xlsx'
+
+#     improvised_unet_model = improvised_unet_build()
+
+#     improvised_unet_model.compile(
+#                             optimizer='adam',
+#                             loss={'grayscale': dice_loss,
+#                                 # 'colour': mse_loss,
+#                                 # 'classifier': 'categorical_crossentropy',
+#                                 # 'contour': weighted_hausdorff_distance,
+#                                 },
+#                             metrics={'grayscale': DiceAccuracy,
+#                                     # 'colour': ['accuracy'],
+#                                     # 'classifier': ['accuracy'],
+#                                     # 'contour': DiceAccuracy,
+#                                     },
+#                             )
+                                
+#     callbacks = [ModelCheckpoint(
+#     filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+
+#     history = improvised_unet_model.fit(X_train, (y_train, ), batch_size=batch_size_,
+#                                         epochs=epochs_, validation_data=(X_valid, (y_valid, )), callbacks=callbacks)
+
+#     del improvised_unet_model
+#     keras.clear_session()
+#     gc.collect()
+
+#     hist = pd.DataFrame(history.history)
+#     hist.to_excel(histpath)
+
+# b1 and b2 :
+
+# improvised_unet_model = improvised_unet_build()
+# improvised_unet_model.summary()
+
+# improvised_unet_model.compile(
+#                         optimizer='adam',
+#                         loss={'grayscale': dice_loss,
+#                               'colour': mse_loss,
+#                             # 'classifier': 'categorical_crossentropy',
+#                             # 'contour': weighted_hausdorff_distance,
+#                             },
+#                         metrics={'grayscale': DiceAccuracy,
+#                                 'colour': ['accuracy'],
+#                                 # 'classifier': ['accuracy'],
+#                                 # 'contour': DiceAccuracy,
+#                                 },
+#                         )
                             
-    callbacks = [ModelCheckpoint(
-    filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+# callbacks = [ModelCheckpoint(
+# filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
 
-    # history = improvised_unet_model.fit(X_train, (y_train, X_train), batch_size=batch_size_,
-    #                                     epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid)), callbacks=callbacks)
+# history = improvised_unet_model.fit(X_train, (y_train, X_train), batch_size=batch_size_,
+#                                     epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid)), callbacks=callbacks)
 
-    # history = improvised_unet_model.fit(X_train, (y_train, X_train, y_train2), batch_size=batch_size_,
-    #                                     epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, y_valid2)), callbacks=callbacks)
+# b1 and b3 :
 
-    history = improvised_unet_model.fit(X_train, (y_train, X_train, y_train2,y_train_contour), batch_size=batch_size_,
-                                        epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, y_valid2, y_valid_contour)), callbacks=callbacks)
+# improvised_unet_model = improvised_unet_build()
+# improvised_unet_model.summary()
+
+# improvised_unet_model.compile(
+#                         optimizer='adam',
+#                         loss={'grayscale': dice_loss,
+#                             #   'colour': mse_loss,
+#                             'classifier': 'categorical_crossentropy',
+#                             # 'contour': weighted_hausdorff_distance,
+#                             },
+#                         metrics={'grayscale': DiceAccuracy,
+#                                 # 'colour': ['accuracy'],
+#                                 'classifier': ['accuracy'],
+#                                 # 'contour': DiceAccuracy,
+#                                 },
+#                         )
+                            
+# callbacks = [ModelCheckpoint(
+# filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
+
+# history = improvised_unet_model.fit(X_train, (y_train , y_train2), batch_size=batch_size_,
+#                                     epochs=epochs_, validation_data=(X_valid, (y_valid, y_valid2)), callbacks=callbacks)
+
+# b1 , b2 and b3  :
 
 
-print("END OF TRAINING")
+for q in range(2):
+    for i in [9]:
+        weights = [[1/3,1/3,1/3],[1/2,1/4,1/4]][q]
+        weights_str = ["33_33_33","50_25_25"][q]
+        setseed(i)
+        
+        folder_name = '/workspace/data/op2/m3a1e1000b32seed'+str(i)+'_Attn_'+weights_str
+        if os.path.exists(folder_name):
+            shutil.rmtree(folder_name)
+        os.makedirs(folder_name)
 
-hist = pd.DataFrame(history.history)
-hist.to_excel('/workspace/data/code_j/trainHistorya.xlsx')
+        improvised_Attnunet_model = Imp_attnUNet()
+        filepath = folder_name+'/m3a1e1000b32seed'+str(i)+'_'+weights_str+'/'
+        histpath = folder_name+'/m3a1e1000b32seed'+str(i)+'_'+weights_str+'.xlsx'
+
+        improvised_Attnunet_model.compile(
+                                optimizer='adam',
+                                loss={'grayscale': dice_loss,
+                                    'colour': mse_loss,
+                                    'classifier': cce_loss,
+                                    # 'contour': weighted_hausdorff_distance,
+                                    },
+                                metrics={'grayscale': DiceAccuracy,
+                                        'colour': ['accuracy'],
+                                        'classifier': ['accuracy'],
+                                        # 'contour': DiceAccuracy,
+                                        },
+                                )
+                                    
+        callbacks = [
+            ModelCheckpoint(filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
+            # tf.keras.callbacks.LearningRateScheduler(lr_scheduler, verbose=1),
+        ]
+        history = improvised_Attnunet_model.fit(X_train, (y_train, X_train, y_train2), batch_size=batch_size_,
+                                            epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, y_valid2)), callbacks=callbacks)
+
+        del improvised_Attnunet_model
+        keras.clear_session()
+        gc.collect()
+
+        hist = pd.DataFrame(history.history)
+        hist.to_excel(histpath)
 
 print("TRAIN COMPLETE")
-
-time.sleep(36000)
