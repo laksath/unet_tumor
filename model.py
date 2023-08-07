@@ -4,7 +4,7 @@ import time
 import shutil
 from sklearn.utils import shuffle
 from tensorflow.keras import backend as keras
-from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import ModelCheckpoint,ReduceLROnPlateau
 from tensorflow.keras.optimizers import *
 from tensorflow.keras.layers import *
 from tensorflow.keras.models import *
@@ -21,10 +21,13 @@ from tensorflow.keras.utils import to_categorical
 from collections import Counter
 import gc
 
+tf.compat.v1.disable_eager_execution()
+
 epochs_ = 1000
 batch_size_ = 32
-# filepath = '/workspace/data/code_j/m3a1e1000b32seed5_baseunet_1/'
-# histpath = '/workspace/data/code_j/m3a1e1000b32seed5_baseunet_1.xlsx'
+
+filepath = '/workspace/data/code_j/m3a1e1000b32seed6_pyramid_4/'
+histpath = '/workspace/data/code_j/m3a1e1000b32seed6_pyramid_4.xlsx'
 
 
 
@@ -33,18 +36,20 @@ def setseed(seedn):
     tf.random.set_seed(seedn)
     tf.keras.utils.set_random_seed(seedn)
     os.environ['PYTHONHASHSEED'] = str(seedn)
-    # tf.config.experimental.enable_op_determinism()
-    # os.environ['TF_DETERMINISTIC_OPS'] = '1'
-    # os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+    tf.config.experimental.enable_op_determinism()
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
 
-# setseed(5)
+setseed(6)
 
 
 # weights = [1/3,1/3,1/3] 
 #weights = [1/2,1/4,1/4]
 #weights = [1/4,1/2,1/4]
 #weights = [1/4,1/4,1/2]
-weights = [1,1,1]
+# weights = [1,1,1]
+
+weights = [0.25,0.25,0.5]
 
 
 
@@ -58,9 +63,10 @@ weights = [1,1,1]
 
 subdir = ["benign_image/", "benign_mask/", "malignant_image/",
           "malignant_mask/", "normal_image/", "normal_mask/"]
+# dataset = ['/workspace/data/code_j/dataset2/',
+#            'train/', 'test/', 'validation/']
 dataset = ['/workspace/data/code_j/dataset/',
            'train/', 'test/', 'validation/']
-
 
 # In[286]:
 ########################################################################################################################
@@ -125,11 +131,148 @@ y_train_contour=(np.array(create_contours((y_train*255).astype(np.uint8))[1])/25
 y_test_contour =(np.array(create_contours((y_test*255).astype(np.uint8))[1])/255).astype(np.float32)
 y_valid_contour=(np.array(create_contours((y_valid*255).astype(np.uint8))[1])/255).astype(np.float32)
 
+
+def SegregateData(dataset, subdir):
+
+    l = [
+            [
+                [[], [], []],
+                [[], [], []],
+                [[], [], []],
+            ], 
+            [
+                [[], [], []],
+                [[], [], []],
+                [[], [], []],
+            ],
+            [
+                [[], [], []],
+                [[], [], []],
+                [[], [], []],
+            ],
+        ]
+
+    for i in range(1, 4):
+        for k in range(3):
+            dir_l = os.listdir(dataset[0]+dataset[i]+subdir[k*2])
+            dir_l2 = os.listdir(dataset[0]+dataset[i]+subdir[k*2+1])
+
+            l1 = []
+            for j in range(len(dir_l)):
+                l1.append(plt.imread(dataset[0]+dataset[i]+subdir[k*2]+dir_l[j]))
+            # l1 = [skimage.transform.resize(image, IMAGE_DIMENSION) for image in l1]
+            
+            l2 = []
+            for j in range(len(dir_l2)):
+                l2.append(plt.imread(dataset[0]+dataset[i]+subdir[k*2+1]+dir_l2[j]))
+            # new_dim = int(256/IMAGE_DIMENSION[0])
+            # l2 = [image[::new_dim,::new_dim] for image in l2]
+
+            l3=[]
+            for j in range(len(dir_l2)):
+                q=[0,0,0]
+                q[k]=1
+                l3.append(q)
+
+            l[i-1][k][0] = np.asarray(l1, dtype=np.float32)/255
+            l[i-1][k][1] = np.asarray(l2, dtype=np.float32)/255
+            l[i-1][k][2] = l3
+
+    return l
+
+l = SegregateData(dataset, subdir)
 # In[127]:
 
 ########################################################################################################################
 ####################################         UNET MODEL          #######################################################
 ########################################################################################################################
+
+def original_improvised_unet_build():
+
+    def conv_block(input_, num_filters):
+        conv2D_1 = Conv2D(filters=num_filters, kernel_size=3,
+                        kernel_initializer='he_normal', padding="same")(input_)
+        batch1 = BatchNormalization()(conv2D_1)
+        act1 = Activation("relu")(batch1)
+        conv2D_2 = Conv2D(filters=num_filters, kernel_size=3,
+                        kernel_initializer='he_normal', padding="same")(act1)
+        batch2 = BatchNormalization()(conv2D_2)
+        act2 = Activation("relu")(batch2)
+        return act2
+
+    def encoder_block(input_, num_filters):
+        conv = conv_block(input_, num_filters)
+        pool = MaxPool2D((2, 2))(conv)
+        drop = Dropout(0.3)(pool)
+        return conv, drop
+
+    def decoder_block(input_, skip_features, num_filters):
+        x = Conv2DTranspose(filters=num_filters, kernel_size=(2, 2), strides=2, padding="same")(input_)
+        x = Concatenate()([x, skip_features])
+        x = Dropout(0.3)(x)
+        x = conv_block(x, num_filters)
+        return x
+
+    def b1(input_,num_filters):
+        x1 = conv_block(input_, num_filters)
+        y1_output = Conv2D(1, 1, padding="same", activation="sigmoid", name='grayscale')(x1)
+        return y1_output
+
+    def b2(input_,num_filters):
+        x2 = conv_block(input_, num_filters)
+        y2_output = Conv2D(3, 1, padding="same", activation="sigmoid", name='colour')(x2)
+        return y2_output
+
+    def b3(input_,num_filters):
+
+        pool1 = MaxPool2D((2, 2))(input_)
+        pool2 = MaxPool2D((2, 2))(pool1)
+        pool3 = MaxPool2D((2, 2))(pool2)
+
+        conv2D_1 = Conv2D(filters=num_filters, kernel_size=3,
+            kernel_initializer='he_normal', padding="same")(pool3)
+        batch1 = BatchNormalization()(conv2D_1)
+        act1 = Activation("relu")(batch1)
+
+        glb = GlobalAveragePooling2D(name='avg_pool')(act1)
+        dense1 = Dense(1000, activation='relu')(glb)
+        dense2 = Dense(3)(dense1)
+        y3_output = tf.keras.layers.Activation('softmax', name='classifier')(dense2)
+        return y3_output
+
+    inputs = Input((256,256,3))
+
+    conv1, pool1 = encoder_block(inputs, 64)
+    conv2, pool2 = encoder_block(pool1, 128)
+    conv3, pool3 = encoder_block(pool2, 256)
+    conv4, pool4 = encoder_block(pool3, 512)
+
+    bridge = conv_block(pool4, 1024)
+
+    decoder_1 = decoder_block(bridge, conv4, 512)
+    decoder_2 = decoder_block(decoder_1, conv3, 256)
+    decoder_3 = decoder_block(decoder_2, conv2, 128)
+
+    x = Conv2DTranspose(filters=64, kernel_size=(
+        2, 2), strides=2, padding="same")(decoder_3)
+    x = Concatenate()([x, conv1])
+    x = Dropout(0.4)(x)
+
+
+    branch1 = b1(x,64)
+
+    # if b2 is needed , uncomment b2; 
+    # if b3 is needed , uncomment b3; 
+    # if both are needed , uncomment both; 
+
+    branch2 = b2(x,64)
+    # branch3 = b3(x,32)
+
+    # model = Model(inputs=inputs, outputs=[branch1,], name="Improvised_UNet")
+    model = Model(inputs=inputs, outputs=[branch1,branch2], name="Improvised_UNet")
+    # model = Model(inputs=inputs, outputs=[branch1,branch3], name="Improvised_UNet")
+    # model = Model(inputs=inputs, outputs=[branch1, branch2, branch3], name="Improvised_UNet")
+    return model
 
 def improvised_unet_build():
 
@@ -187,7 +330,8 @@ def improvised_unet_build():
         y3_output = tf.keras.layers.Activation('softmax', name='classifier')(dense2)
         return y3_output
 
-    inputs = Input((256,256,3))
+    # inputs = Input((256,256,3))
+    inputs = Input((288,288,3))
 
     conv1, pool1 = encoder_block(inputs, 16)
     conv2, pool2 = encoder_block(pool1, 32)
@@ -212,13 +356,13 @@ def improvised_unet_build():
     # if b3 is needed , uncomment b3; 
     # if both are needed , uncomment both; 
 
-    branch2 = b2(x,16)
-    branch3 = b3(x,32)
+    # branch2 = b2(x,16)
+    # branch3 = b3(x,32)
 
-    # model = Model(inputs=inputs, outputs=[branch1,], name="Improvised_UNet")
+    model = Model(inputs=inputs, outputs=[branch1,], name="Improvised_UNet")
     # model = Model(inputs=inputs, outputs=[branch1,branch2], name="Improvised_UNet")
     # model = Model(inputs=inputs, outputs=[branch1,branch3], name="Improvised_UNet")
-    model = Model(inputs=inputs, outputs=[branch1, branch2, branch3], name="Improvised_UNet")
+    # model = Model(inputs=inputs, outputs=[branch1, branch2, branch3], name="Improvised_UNet")
     return model
 
 
@@ -315,6 +459,123 @@ def Imp_attnUNet():
     return model
 
 
+def ImpResUNet():
+    #https://www.kaggle.com/code/firqaaa/residual-unet-keras-implementation/notebook
+    def bn_act(x, act=True):
+        x = BatchNormalization()(x)
+        if act == True:
+            x = Activation("relu")(x)
+        return x 
+
+    def conv_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
+        conv = bn_act(x)
+        conv = Conv2D(filters, kernel_size, padding=padding, strides=strides)(conv)
+        return conv 
+
+    def stem(x, filters, kernel_size=(3, 3), padding="same", strides=1):
+        conv = Conv2D(filters, kernel_size, padding=padding, strides=strides)(x)
+        conv = conv_block(conv, filters, kernel_size=kernel_size, padding=padding, strides=strides)
+
+        shortcut = Conv2D(filters, kernel_size=(1, 1), padding=padding, strides=strides)(x)
+        shortcut = bn_act(shortcut, act=False)
+
+        output = Add()([conv, shortcut])
+        return output 
+
+    def residual_block(x, filters, kernel_size=(3, 3), padding='same', strides=1):
+        res = conv_block(x, filters, kernel_size=kernel_size, padding=padding, strides=strides)
+        res = conv_block(res, filters, kernel_size=kernel_size, padding=padding, strides=1)
+
+        shortcut = Conv2D(filters, kernel_size=(1, 1), padding=padding, strides=strides)(x)
+        shortcut = bn_act(shortcut, act=False)
+        
+        output = Add()([shortcut, res])
+        return output
+
+    def upsample_concat_block(x, xskip):
+        u = UpSampling2D((2, 2))(x)
+        c = Concatenate()([u, xskip])
+        return c
+
+    def b1_(input_,num_filters):
+        x1 = conv_block(input_, num_filters)
+        y1_output = Conv2D(1, 1, padding="same",
+                        activation="sigmoid", name='grayscale')(x1)
+        return y1_output
+
+    def b2_(input_,num_filters):
+        x2 = conv_block(input_, num_filters)
+        y2_output = Conv2D(3, 1, padding="same",
+                        activation="sigmoid", name='colour')(x2)
+        return y2_output
+
+    def b3_(input_,num_filters):
+
+        pool1 = MaxPool2D((2, 2))(input_)
+        pool2 = MaxPool2D((2, 2))(pool1)
+        pool3 = MaxPool2D((2, 2))(pool2)
+
+        conv2D_1 = Conv2D(filters=num_filters, kernel_size=3,
+            kernel_initializer='he_normal', padding="same")(pool3)
+        batch1 = BatchNormalization()(conv2D_1)
+        act1 = Activation("relu")(batch1)
+
+        glb = GlobalAveragePooling2D(name='avg_pool')(act1)
+        dense1 = Dense(1000, activation='relu')(glb)
+        dense2 = Dense(3)(dense1)
+        y3_output = tf.keras.layers.Activation('softmax', name='classifier')(dense2)
+        return y3_output
+
+    def ResUNet():
+        f = [16, 32, 64, 128, 256]
+        inputs = Input((256, 256, 3))
+
+        ## ENCODER 
+        e0 = inputs
+        e1 = stem(e0, f[0])
+        e2 = residual_block(e1, f[1], strides=2)
+        e3 = residual_block(e2, f[2], strides=2)
+        e4 = residual_block(e3, f[3], strides=2)
+        e5 = residual_block(e4, f[4], strides=2)
+
+        # BRIDGE
+        b0 = conv_block(e5, f[4], strides=1)
+        b1 = conv_block(b0, f[4], strides=1)
+
+        # DECODER 
+        u1 = upsample_concat_block(b1, e4)
+        d1 = residual_block(u1, f[4])
+
+        u2 = upsample_concat_block(d1, e3)
+        d2 = residual_block(u2, f[3])
+
+        u3 = upsample_concat_block(d2, e2)
+        d3 = residual_block(u3, f[2])
+
+        u4 = upsample_concat_block(d3, e1)
+        d4 = residual_block(u4, f[1])
+
+        # outputs = Conv2D(1, (1, 1), padding='same', activation='sigmoid')(d4)
+
+        branch1 = b1_(d4,16)
+
+        # if b2 is needed , uncomment b2; 
+        # if b3 is needed , uncomment b3; 
+        # if both are needed , uncomment both; 
+
+        branch2 = b2_(d4,16)
+        branch3 = b3_(d4,32)
+
+        # model = Model(inputs=inputs, outputs=[branch1,], name="Improvised_UNet")
+        # model = Model(inputs=inputs, outputs=[branch1,branch2], name="Improvised_UNet")
+        # model = Model(inputs=inputs, outputs=[branch1,branch3], name="Improvised_UNet")
+        model = Model(inputs=inputs, outputs=[branch1, branch2, branch3], name="ImprovisedRes_UNet")
+
+        return model
+    
+    model = ResUNet()
+    return model
+
 def ResUNet():
     #https://www.kaggle.com/code/firqaaa/residual-unet-keras-implementation/notebook
     def bn_act(x, act=True):
@@ -388,7 +649,7 @@ def ResUNet():
     
     model = ResUNet()
     return model
-    
+
 def PSPNet():
     def conv_block(X,filters,block):
         b = 'block_'+str(block)+'_'
@@ -451,6 +712,7 @@ def PSPNet():
         # X = Flatten(name='last_conv_flatten')(X)
         model = Model(inputs=inputs, outputs=X, name="PSPNet")
         return model
+    
     return last_conv_module()
 
 
@@ -551,12 +813,11 @@ def DiceAccuracy(targets, inputs, smooth=1):
     inputs = keras.flatten(inputs)
     targets = keras.flatten(targets)
     intersection = keras.sum(targets*inputs)
-    dice = (2*intersection + smooth) / \
-        (keras.sum(targets) + keras.sum(inputs) + smooth)
+    dice = (2*intersection + smooth) / (keras.sum(targets) + keras.sum(inputs) + smooth)
     return dice
 
 def dice_loss(y_true, y_pred):
-    return weights[0]*(1-DiceAccuracy(y_true, y_pred))
+    return (1-DiceAccuracy(y_true, y_pred))
 
 def DiceCoeff(y_true, y_pred, smooth=1e-6):
     y_true_f = keras.flatten(y_true)
@@ -633,18 +894,410 @@ def weighted_hausdorff_distance(y_true, y_pred):
 # def lr_scheduler(epoch, lr):
 #     return 4*0.001 * math.pow(0.75, math.floor(epoch/200))
 
-# PSPNet_model = PSPNet()
-# PSPNet_model.summary()
-# callbacks = [ModelCheckpoint(
-#     filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True)]
-# PSPNet_model.compile(
-#     optimizer='adam',
-#     loss=dice_loss,
-#     metrics=[DiceAccuracy]
-# )
-# history = PSPNet_model.fit(X_train, y_train, batch_size=batch_size_,
-#                             epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
+setseed(i)
 
+# def py():
+#     def conv_block(X,filters,block):
+#         # resiudal block with dilated convolutions
+#         # add skip connection at last after doing convoluion operation to input X
+        
+#         b = 'block_'+str(block)+'_'
+#         f1,f2,f3 = filters
+#         X_skip = X
+#         # block_a
+#         X = Convolution2D(filters=f1,kernel_size=(1,1),dilation_rate=(1,1),
+#                         padding='same',kernel_initializer='he_normal',name=b+'a')(X)
+#         X = BatchNormalization(name=b+'batch_norm_a')(X)
+#         X = LeakyReLU(alpha=0.2,name=b+'leakyrelu_a')(X)
+#         # block_b
+#         X = Convolution2D(filters=f2,kernel_size=(3,3),dilation_rate=(2,2),
+#                         padding='same',kernel_initializer='he_normal',name=b+'b')(X)
+#         X = BatchNormalization(name=b+'batch_norm_b')(X)
+#         X = LeakyReLU(alpha=0.2,name=b+'leakyrelu_b')(X)
+#         # block_c
+#         X = Convolution2D(filters=f3,kernel_size=(1,1),dilation_rate=(1,1),
+#                         padding='same',kernel_initializer='he_normal',name=b+'c')(X)
+#         X = BatchNormalization(name=b+'batch_norm_c')(X)
+#         # skip_conv
+#         X_skip = Convolution2D(filters=f3,kernel_size=(3,3),padding='same',name=b+'skip_conv')(X_skip)
+#         X_skip = BatchNormalization(name=b+'batch_norm_skip_conv')(X_skip)
+#         # block_c + skip_conv
+#         X = Add(name=b+'add')([X,X_skip])
+#         X = ReLU(name=b+'relu')(X)
+#         return X
+    
+#     def base_feature_maps(input_layer):
+#         # base covolution module to get input image feature maps 
+        
+#         # block_1
+#         base = conv_block(input_layer,[32,32,64],'1')
+#         # block_2
+#         base = conv_block(base,[64,64,128],'2')
+#         # block_3
+#         base = conv_block(base,[128,128,256],'3')
+#         return base
+
+#     def pyramid_feature_maps(input_layer):
+#         # pyramid pooling module
+        
+#         base = base_feature_maps(input_layer)
+#         # red
+#         red = GlobalAveragePooling2D(name='red_pool')(base)
+#         red = tf.keras.layers.Reshape((1,1,256))(red)
+#         red = Convolution2D(filters=64,kernel_size=(1,1),name='red_1_by_1')(red)
+#         red = UpSampling2D(size=256,interpolation='bilinear',name='red_upsampling')(red)
+#         # yellow
+#         yellow = AveragePooling2D(pool_size=(2,2),name='yellow_pool')(base)
+#         yellow = Convolution2D(filters=64,kernel_size=(1,1),name='yellow_1_by_1')(yellow)
+#         yellow = UpSampling2D(size=2,interpolation='bilinear',name='yellow_upsampling')(yellow)
+#         # blue
+#         blue = AveragePooling2D(pool_size=(4,4),name='blue_pool')(base)
+#         blue = Convolution2D(filters=64,kernel_size=(1,1),name='blue_1_by_1')(blue)
+#         blue = UpSampling2D(size=4,interpolation='bilinear',name='blue_upsampling')(blue)
+#         # green
+#         green = AveragePooling2D(pool_size=(8,8),name='green_pool')(base)
+#         green = Convolution2D(filters=64,kernel_size=(1,1),name='green_1_by_1')(green)
+#         green = UpSampling2D(size=8,interpolation='bilinear',name='green_upsampling')(green)
+#         # base + red + yellow + blue + green
+#         return tf.keras.layers.concatenate([base,red,yellow,blue,green])
+
+#     def last_conv_module(input_layer):
+#         X = pyramid_feature_maps(input_layer)
+#         X = Convolution2D(filters=1,kernel_size=1,padding='same',name='last_conv_3_by_3')(X)
+#         X = BatchNormalization(name='last_conv_3_by_3_batch_norm')(X)
+#         X = Activation('sigmoid',name='last_conv_relu')(X)
+#         return X
+    
+#     input_layer = Input((256, 256, 3))
+#     output_layer = last_conv_module(input_layer)
+#     model = tf.keras.Model(inputs=input_layer,outputs=output_layer)
+#     return model
+
+from tensorflow.keras.layers import (Dense, Conv2D, MaxPool2D, AveragePooling2D, BatchNormalization, Add,
+                                     Activation, Input, ZeroPadding2D, Flatten, GlobalAveragePooling2D, Dropout,
+                                     UpSampling2D, Concatenate, Reshape, Softmax, ReLU)
+from tensorflow.keras.layers.experimental.preprocessing import Resizing
+
+def ResNet50(input_shape=None, input_tensor=None, num_classes=None, dr=(1,1)):
+
+    def ConvBlock(x, filters, kernel=(1,1), strides=(1,1), dr=(1,1), stage=None, block=None, ident=True):
+        '''
+            dr: tuple, dilitation_rate, e.g. (1,1)
+            ident: bool, if ident == true => downsampling
+        '''
+        # name
+        name = 'conv' + str(stage) + '_block' + str(block)
+
+        # filters
+        f1, f2, f3 = filters
+
+        # save inital input value
+        x_initial = x
+
+        x = Conv2D(filters=f1, kernel_size=(1,1), strides=strides, name=name+'_1_conv')(x)
+        x = BatchNormalization(name=name + '_1_bn')(x)
+        x = ReLU(name=name + '_1_relu')(x)
+
+        x = Conv2D(filters=f2, kernel_size=kernel, strides=(1,1), padding='same', dilation_rate=dr, name=name+'_2_conv')(x)
+        x = BatchNormalization(name=name + '_2_bn')(x)
+        x = ReLU(name=name + '_2_relu')(x)
+
+        x = Conv2D(filters=f3, kernel_size=(1,1), strides=(1,1), name=name+'_3_conv')(x)
+        x = BatchNormalization(name=name + '_3_bn')(x)
+
+        # reshape input dim to output dim
+        if ident == False:
+            x_initial = Conv2D(filters=f3, kernel_size=(1,1), strides=strides, name=name+'_0_conv')(x_initial)
+            x_initial = BatchNormalization(name=name + '_0_bn')(x_initial)
+
+        # add the input value x to the output and apply ReLU function
+        x = Add(name=name + '_add')([x_initial, x])
+        x = ReLU(name=name + '_out')(x)
+
+        return x
+
+    
+    '''
+        dr: tuple, dilitation_rate, e.g. (1,1)
+    '''
+
+    if input_tensor is None:
+        input = Input(shape = input_shape, name = 'input')
+    elif tf.keras.backend.is_keras_tensor(input_tensor):
+        input = Input(shape = input_tensor.shape[1:], name = 'input')
+
+    # INPUT
+    x = ZeroPadding2D(padding = (3,3), name = 'conv1_pad')(input)
+
+    # STAGE 1
+    x = Conv2D(filters=64, kernel_size=(7,7), strides=(2,2), padding='valid', name='conv1_conv')(x)
+    x = BatchNormalization(name='conv1_bn')(x)
+    x = ReLU(name='conv1_relu')(x)
+    x = ZeroPadding2D(padding=(1, 1), name='pool1_pad')(x)
+    x = MaxPool2D(pool_size=(3,3), strides=(2, 2), name='pool1_pool')(x)
+
+    # STAGE 2
+    x = ConvBlock(x, filters=[64, 64, 256], strides=(1,1), dr=dr, stage=2, block=1, ident=False)
+    x = ConvBlock(x, filters=[64, 64, 256], dr=dr, stage=2, block=2)
+    x = ConvBlock(x, filters=[64, 64, 256], dr=dr, stage=2, block=3)
+
+    # STAGE 3
+    x = ConvBlock(x, filters=[128,128,512], strides=(2,2), dr=dr, stage=3, block=1, ident=False)
+    x = ConvBlock(x, filters=[128,128,512], dr=dr, stage=3, block=2)
+    x = ConvBlock(x, filters=[128,128,512], dr=dr, stage=3, block=3)
+    x = ConvBlock(x, filters=[128,128,512], dr=dr, stage=3, block=4)
+
+    # STAGE 4
+    x = ConvBlock(x, filters=[256, 256, 1024], strides=(2,2), dr = dr, stage=4, block=1, ident=False)
+    x = ConvBlock(x, filters=[256, 256, 1024], dr=dr, stage=4, block=2)
+    x = ConvBlock(x, filters=[256, 256, 1024], dr=dr, stage=4, block=3)
+    x = ConvBlock(x, filters=[256, 256, 1024], dr=dr, stage=4, block=4)
+    x = ConvBlock(x, filters=[256, 256, 1024], dr=dr, stage=4, block=5)
+    x = ConvBlock(x, filters=[256, 256, 1024], dr=dr, stage=4, block=6)
+
+    # STAGE 5
+    x = ConvBlock(x, filters=[512, 512, 2048], strides=(2,2), dr=dr, stage=5, block=1, ident = False)
+    x = ConvBlock(x, filters=[512, 512, 2048], dr=dr, stage=5, block=2)
+    x = ConvBlock(x, filters=[512, 512, 2048], dr=dr, stage=5, block=3)
+
+    # OUTPUT
+    x = GlobalAveragePooling2D(name='avg_pool')(x)
+    output = Dense(units = num_classes,  activation='softmax', name='predictions')(x)
+
+    model = Model(inputs = [input], outputs = [output], name = 'ResNet50')
+
+    return model
+
+def PSPNet(input_shape, num_classes, pool_sizes):
+    
+    def PyramidPooling(input_shape = None, input_tensor = None, pool_sizes = None):
+        '''pool_sizes = [(1,1), (2,2), (3,3), (6,6)]'''
+
+        if input_tensor is None:
+            input = Input(shape = input_shape)
+        elif tf.keras.backend.is_keras_tensor(input_tensor):
+            input = Input(shape = input_tensor.shape[1:])
+
+        _, input_height, input_width, input_depth = input.shape
+
+        N = len(pool_sizes) # number pyramid levels
+
+        f = input_depth // N # pyramid level depth
+        
+        output = [input]
+
+        for level, pool_size in enumerate(pool_sizes):
+            x = AveragePooling2D(pool_size = pool_size, padding = 'same', name='avg_'+str(level))(input)
+            x = Conv2D(filters = f, kernel_size = (1,1), name='conv_'+str(level))(x)
+            x = UpSampling2D(size = pool_size, interpolation = 'bilinear', name='bilinear_'+str(level))(x)
+
+            # Crop/pad to input size
+            # Pooling with padding = 'same': After upsamling => size > input size => crop
+            # Pooling with padding = 'valid': After upsamling => size < input size => pad
+            height, width = x.shape[1:3]
+            dif_height, dif_width = height - input_height, width - input_width
+            x = tf.keras.layers.Cropping2D(cropping = ((0,dif_height), (0,dif_width)), name='crop_'+str(level))(x)
+
+            output += [x]
+
+        # concatenate input and pyramid levels
+        output = Concatenate(name='concatenate')(output)
+
+        model = Model(inputs = [input], outputs = [output], name = 'pyramid_module')
+
+        return model
+    
+    def Decoder(input_shape = None, input_tensor = None, target_shape = None, num_classes = None):
+        '''target_shape: (H,W)'''
+
+        if input_tensor is None:
+            input = Input(shape = input_shape)
+        elif tf.keras.backend.is_keras_tensor(input_tensor):
+            input = Input(shape = input_tensor.shape[1:])
+
+        height, width = target_shape
+
+        x = Conv2D(filters = 512, kernel_size = (3,3))(input)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+
+        x = Dropout(.1)(x)
+
+        # x = Conv2D(filters = num_classes, kernel_size = (1,1))(x)
+        x = Conv2D(filters = num_classes, kernel_size = (1,1), activation='sigmoid')(x)
+        x = Resizing(height = height, width = width, interpolation = 'bilinear', name = 'resize')(x)
+        
+        # output = Softmax(name = 'segmentation')(x)
+        # model = Model(inputs = [input], outputs = [output], name = 'decoder')
+
+        model = Model(inputs = [input], outputs = [x], name = 'decoder')
+
+        return model
+
+    input = Input(shape = input_shape, name = 'input')
+
+    target_shape = input_shape[:2] # (H,W,B) => (H,W)
+
+    # truncate resnet after 3. stage
+    resnet = ResNet50(input_tensor=input, num_classes=num_classes, dr=(2,2))
+    resnet_output = resnet.get_layer('conv3_block4_out')
+    basemodel = Model(inputs = resnet.input, outputs = resnet_output.output, name = 'resnet')
+
+    pyramid_module = PyramidPooling(input_tensor=basemodel.output, pool_sizes=pool_sizes)
+
+    decoder = Decoder(input_tensor = pyramid_module.output, target_shape = target_shape, num_classes = num_classes)
+
+    x = basemodel(input)
+    x = pyramid_module(x)
+    output = decoder(x)
+
+    pspnet = Model(inputs = [input], outputs = [output], name = 'pspnet')
+
+    return pspnet
+
+
+
+# from segmentation_models import PSPNet
+# import segmentation_models as sm
+# sm.set_framework('tf.keras')
+
+# PSPNet_model = py()
+PSPNet_model = PSPNet((256, 256, 3), 1, [(1,1), (2,2), (3,3), (6,6)])
+# PSPNet_model = sm.PSPNet(input_shape=(288, 288, 3), classes=1, activation='sigmoid')
+PSPNet_model.summary()
+
+class TestCallback(tf.keras.callbacks.Callback):
+        def __init__(self):
+            super().__init__()
+
+        def on_epoch_end(self, epoch, logs=None):
+            
+            # X_valid3, y_valid3 = shuffle(X_valid, y_valid, random_state=5)
+            # pred_valid = PSPNet_model.predict(X_valid3)
+            
+            # pred_valid_32 = np.array_split(pred_valid, len(pred_valid)/32)
+            # y_valid3_32 = np.array_split(y_valid3, len(y_valid3)/32)
+            
+            # logs['val_dice'] = sum(DiceAccuracy(pred_valid_32[x], y_valid3_32[x]) for x in range(len(pred_valid_32)))/len(pred_valid_32)
+            
+            pred_valid = PSPNet_model.predict(X_valid)
+            logs['val_dice'] = DiceAccuracy(pred_valid[:32], y_valid[:32])
+
+callbacks = [ModelCheckpoint(filepath=filepath, monitor='val_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
+            # TestCallback()
+            ]
+
+PSPNet_model.compile(
+    optimizer='adam',
+    loss=dice_loss,
+    metrics=[DiceAccuracy],
+)
+
+# sm.utils.set_trainable(PSPNet_model, recompile=True)
+
+# PSPNet_model.compile(
+#     optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+#     loss=dice_loss,
+#     metrics=[DiceAccuracy],
+# )
+
+
+history = PSPNet_model.fit(X_train, y_train, batch_size=batch_size_,
+                            epochs=epochs_, validation_data=(X_valid, y_valid), callbacks=callbacks)
+hist = pd.DataFrame(history.history)
+hist.to_excel(histpath)
+
+# add weights at dl
+
+# for i in [6]:
+#     setseed(i)
+    
+#     if os.path.exists('/workspace/data/op2/T_m3_original_a1e1000b32b13seed'+str(i)):
+#         shutil.rmtree('/workspace/data/op2/T_m3_original_a1e1000b32b13seed'+str(i))
+#     os.makedirs('/workspace/data/op2/T_m3_original_a1e1000b32b13seed'+str(i))
+
+#     original_improvised_unet_model = original_improvised_unet_build()
+#     filepath = '/workspace/data/op2/T_m3_original_a1e1000b32b13seed'+str(i)+'/m3_original_a1e1000b32b12_final_seed'+str(i)+'/'
+#     histpath = '/workspace/data/op2/T_m3_original_a1e1000b32b13seed'+str(i)+'/m3_original_a1e1000b32b12_final_seed'+str(i)+'.xlsx'
+
+#     original_improvised_unet_model.compile(
+#                             optimizer='adam',
+#                             loss={
+#                                     'grayscale': dice_loss,
+#                                     'colour': mse_loss,
+#                                     # 'classifier': cce_loss,
+#                                     # 'contour': weighted_hausdorff_distance,
+#                                 },
+#                             metrics={
+#                                         'grayscale': DiceAccuracy,
+#                                         'colour': ['accuracy'],
+#                                         # 'classifier': ['accuracy'],
+#                                         # 'contour': DiceAccuracy,
+#                                 },
+#                             )
+    
+#     class TestCallback(tf.keras.callbacks.Callback):
+#         def __init__(self, l):
+#             super().__init__()
+
+#         # X_train_benign   --> l[0][0][0]  # X_test_benign   --> l[1][0][0]  # X_validation_benign   --> l[2][0][0]
+#         # y_train_benign   --> l[0][0][1]  # y_test_benign   --> l[1][0][1]  # y_validation_benign   --> l[2][0][1]
+#         # X_train_malgiant --> l[0][1][0]  # X_test_malgiant --> l[1][1][0]  # X_validation_malgiant --> l[2][1][0]
+#         # y_train_malgiant --> l[0][1][1]  # y_test_malgiant --> l[1][1][1]  # y_validation_malgiant --> l[2][1][1]
+#         # X_train_normal   --> l[0][2][0]  # X_test_normal   --> l[1][2][0]  # X_validation_normal   --> l[2][2][0]
+#         # y_train_normal   --> l[0][2][1]  # y_test_normal   --> l[1][2][1]  # y_validation_normal   --> l[2][2][1]
+        
+#         def on_epoch_end(self, epoch, logs=None):
+            
+#             pred_test_benign = original_improvised_unet_model.predict(l[1][0][0])
+#             pred_test_malignant = original_improvised_unet_model.predict(l[1][1][0])
+#             pred_test_normal = original_improvised_unet_model.predict(l[1][2][0])
+            
+#             pred_validation_benign = original_improvised_unet_model.predict(l[2][0][0])
+#             pred_validation_malignant = original_improvised_unet_model.predict(l[2][1][0])
+#             pred_validation_normal = original_improvised_unet_model.predict(l[2][2][0])
+            
+#             y_valid_pred = original_improvised_unet_model.predict(X_valid)
+#             y_test_pred = original_improvised_unet_model.predict(X_test)
+            
+#             def DiceCoeff_npy(y_true, y_pred, smooth=1e-6):
+#                 y_true_f = y_true.flatten()
+#                 y_pred_f = (y_pred.flatten()>0.5).astype(np.float32)
+#                 intersection = y_true_f * y_pred_f
+#                 score = (2. * np.sum(intersection) + smooth) / (np.sum(y_true_f) + np.sum(y_pred_f) + smooth)
+#                 return score
+            
+#             logs['val_dice_ben'] = sum([DiceCoeff_npy(l[2][0][1][i],pred_validation_benign[0][i]) for i in range(len(l[2][0][1]))])/len(l[2][0][1])
+#             logs['val_dice_mal'] = sum([DiceCoeff_npy(l[2][1][1][i],pred_validation_malignant[0][i]) for i in range(len(l[2][1][1]))])/len(l[2][1][1])
+#             logs['val_dice_nor'] = sum([DiceCoeff_npy(l[2][2][1][i],pred_validation_normal[0][i]) for i in range(len(l[2][2][1]))])/len(l[2][2][1])
+            
+#             logs['test_dice_ben'] = sum([DiceCoeff_npy(l[1][0][1][i],pred_test_benign[0][i]) for i in range(len(l[1][0][1]))])/len(l[1][0][1])
+#             logs['test_dice_mal'] = sum([DiceCoeff_npy(l[1][1][1][i],pred_test_malignant[0][i]) for i in range(len(l[1][1][1]))])/len(l[1][1][1])
+#             logs['test_dice_nor'] = sum([DiceCoeff_npy(l[1][2][1][i],pred_test_normal[0][i]) for i in range(len(l[1][2][1]))])/len(l[1][2][1])
+            
+#             logs['valid_dice'] = DiceCoeff(y_valid,y_valid_pred[0]).numpy()
+#             logs['test_dice'] = DiceCoeff(y_test,y_test_pred[0]).numpy()
+                                
+#             logs['valid_dice_npy'] = sum([DiceCoeff_npy(y_valid[i],y_valid_pred[0][i]) for i in range(len(y_valid))])/len(y_valid)
+#             logs['test_dice_npy'] =  sum([DiceCoeff_npy(y_test[i],y_test_pred[0][i]) for i in range(len(y_test))])/len(y_test)
+                                
+#             logs['test_reconstruction'] = mse_loss(X_test,y_test_pred[1])
+            
+#     callbacks = [
+#         ModelCheckpoint(filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
+#         TestCallback(l=l),
+#         ReduceLROnPlateau(monitor='grayscale_loss', factor=0.2, patience=150 , min_lr=1e-7),
+#     ]
+    
+#     history = original_improvised_unet_model.fit(X_train, (y_train, X_train), batch_size=batch_size_,
+#                                         epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid)), callbacks=callbacks)
+
+#     del original_improvised_unet_model
+#     keras.clear_session()
+#     gc.collect()
+
+#     hist = pd.DataFrame(history.history)
+    # hist.to_excel(histpath)
 
 # for i in [9]:
 #     setseed(i)
@@ -790,50 +1443,142 @@ def weighted_hausdorff_distance(y_true, y_pred):
 # history = improvised_unet_model.fit(X_train, (y_train , y_train2), batch_size=batch_size_,
 #                                     epochs=epochs_, validation_data=(X_valid, (y_valid, y_valid2)), callbacks=callbacks)
 
+
 # b1 , b2 and b3  :
 
+# for i in [6]:
+#     setseed(i)
+    
+#     if os.path.exists('/workspace/data/op2/m3_original_a1e1000b32b12seed'+str(i)):
+#         shutil.rmtree('/workspace/data/op2/m3_original_a1e1000b32b12seed'+str(i))
+#     os.makedirs('/workspace/data/op2/m3_original_a1e1000b32b12seed'+str(i))
 
-for q in range(2):
-    for i in [9]:
-        weights = [[1/3,1/3,1/3],[1/2,1/4,1/4]][q]
-        weights_str = ["33_33_33","50_25_25"][q]
-        setseed(i)
+#     original_improvised_unet_model = original_improvised_unet_build()
+#     filepath = '/workspace/data/op2/m3_original_a1e1000b32b12seed'+str(i)+'/m3_original_a1e1000b32b12seed'+str(i)+'/'
+#     histpath = '/workspace/data/op2/m3_original_a1e1000b32b12seed'+str(i)+'/m3_original_a1e1000b32b12seed'+str(i)+'.xlsx'
+
+#     original_improvised_unet_model.compile(
+#                             optimizer='adam',
+#                             loss={
+#                                     'grayscale': dice_loss,
+#                                     'colour': mse_loss,
+#                                     # 'classifier': cce_loss,
+#                                     # 'contour': weighted_hausdorff_distance,
+#                                 },
+#                             metrics={
+#                                         'grayscale': DiceAccuracy,
+#                                         'colour': ['accuracy'],
+#                                         # 'classifier': ['accuracy'],
+#                                         # 'contour': DiceAccuracy,
+#                                 },
+#                             )
+                                
+#     callbacks = [
+#         ModelCheckpoint(filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
+#         # tf.keras.callbacks.LearningRateScheduler(lr_scheduler, verbose=1),
+#     ]
+#     history = original_improvised_unet_model.fit(X_train, (y_train, X_train, ), batch_size=batch_size_,
+#                                         epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, )), callbacks=callbacks)
+
+#     history = original_improvised_unet_model.fit(X_train, (y_train, X_train, ), batch_size=batch_size_,
+#                                         epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, )), callbacks=callbacks)
+
+#     del original_improvised_unet_model
+#     keras.clear_session()
+#     gc.collect()
+
+#     hist = pd.DataFrame(history.history)
+#     hist.to_excel(histpath)
+
+
+# for q in range(2):
+#     for i in [2,3,4,5,6,7,8,9]:
+#         weights = [[1/3,1/3,1/3],[1/2,1/4,1/4]][q]
+#         weights_str = ["33_33_33","50_25_25"][q]
+#         setseed(i)
         
-        folder_name = '/workspace/data/op2/m3a1e1000b32seed'+str(i)+'_Attn_'+weights_str
-        if os.path.exists(folder_name):
-            shutil.rmtree(folder_name)
-        os.makedirs(folder_name)
+#         if os.path.exists('/workspace/data/op2/m3_original_a1e1000b32seed'+str(i)+weights_str):
+#             shutil.rmtree('/workspace/data/op2/m3_original_a1e1000b32seed'+str(i)+weights_str)
+#         os.makedirs('/workspace/data/op2/m3_original_a1e1000b32seed'+str(i)+weights_str)
 
-        improvised_Attnunet_model = Imp_attnUNet()
-        filepath = folder_name+'/m3a1e1000b32seed'+str(i)+'_'+weights_str+'/'
-        histpath = folder_name+'/m3a1e1000b32seed'+str(i)+'_'+weights_str+'.xlsx'
+#         original_improvised_unet_model = original_improvised_unet_build()
+#         filepath = '/workspace/data/op2/m3_original_a1e1000b32seed'+str(i)+weights_str+'/m3_original_a1e1000b32seed'+str(i)+weights_str+'/'
+#         histpath = '/workspace/data/op2/m3_original_a1e1000b32seed'+str(i)+weights_str+'/m3_original_a1e1000b32seed'+str(i)+weights_str+'.xlsx'
 
-        improvised_Attnunet_model.compile(
-                                optimizer='adam',
-                                loss={'grayscale': dice_loss,
-                                    'colour': mse_loss,
-                                    'classifier': cce_loss,
-                                    # 'contour': weighted_hausdorff_distance,
-                                    },
-                                metrics={'grayscale': DiceAccuracy,
-                                        'colour': ['accuracy'],
-                                        'classifier': ['accuracy'],
-                                        # 'contour': DiceAccuracy,
-                                        },
-                                )
+#         original_improvised_unet_model.compile(
+#                                 optimizer='adam',
+#                                 loss={
+#                                         'grayscale': dice_loss,
+#                                         'colour': mse_loss,
+#                                         'classifier': cce_loss,
+#                                         # 'contour': weighted_hausdorff_distance,
+#                                     },
+#                                 metrics={
+#                                             'grayscale': DiceAccuracy,
+#                                             'colour': ['accuracy'],
+#                                             'classifier': ['accuracy'],
+#                                             # 'contour': DiceAccuracy,
+#                                     },
+#                                 )
                                     
-        callbacks = [
-            ModelCheckpoint(filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
-            # tf.keras.callbacks.LearningRateScheduler(lr_scheduler, verbose=1),
-        ]
-        history = improvised_Attnunet_model.fit(X_train, (y_train, X_train, y_train2), batch_size=batch_size_,
-                                            epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, y_valid2)), callbacks=callbacks)
+#         callbacks = [
+#             ModelCheckpoint(filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
+#             # tf.keras.callbacks.LearningRateScheduler(lr_scheduler, verbose=1),
+#         ]
+#         history = original_improvised_unet_model.fit(X_train, (y_train, X_train, y_train2), batch_size=batch_size_,
+#                                             epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, y_valid2)), callbacks=callbacks)
 
-        del improvised_Attnunet_model
-        keras.clear_session()
-        gc.collect()
+#         del original_improvised_unet_model
+#         keras.clear_session()
+#         gc.collect()
 
-        hist = pd.DataFrame(history.history)
-        hist.to_excel(histpath)
+#         hist = pd.DataFrame(history.history)
+#         hist.to_excel(histpath)
+
+# for q in range(2):
+#     for i in [9]:
+#         weights = [[1/3,1/3,1/3],[1/2,1/4,1/4]][q]
+#         weights_str = ["33_33_33","50_25_25"][q]
+#         setseed(i)
+        
+#         folder_name = '/workspace/data/op2/m3a1e1000b32seed'+str(i)+'_Attn_'+weights_str
+#         if os.path.exists(folder_name):
+#             shutil.rmtree(folder_name)
+#         os.makedirs(folder_name)
+
+#         improvised_Attnunet_model = Imp_attnUNet()
+#         filepath = folder_name+'/m3a1e1000b32seed'+str(i)+'_'+weights_str+'/'
+#         histpath = folder_name+'/m3a1e1000b32seed'+str(i)+'_'+weights_str+'.xlsx'
+
+#         improvised_Attnunet_model.compile(
+#                                 optimizer='adam',
+#                                 loss={'grayscale': dice_loss,
+#                                     'colour': mse_loss,
+#                                     'classifier': cce_loss,
+#                                     # 'contour': weighted_hausdorff_distance,
+#                                     },
+#                                 metrics={'grayscale': DiceAccuracy,
+#                                         'colour': ['accuracy'],
+#                                         'classifier': ['accuracy'],
+#                                         # 'contour': DiceAccuracy,
+#                                         },
+#                                 )
+                                    
+#         callbacks = [
+#             ModelCheckpoint(filepath=filepath, monitor='val_grayscale_DiceAccuracy', mode='max', verbose=1, save_best_only=True),
+#             # tf.keras.callbacks.LearningRateScheduler(lr_scheduler, verbose=1),
+#         ]
+#         history = improvised_Attnunet_model.fit(X_train, (y_train, X_train, y_train2), batch_size=batch_size_,
+#                                             epochs=epochs_, validation_data=(X_valid, (y_valid, X_valid, y_valid2)), callbacks=callbacks)
+
+#         del improvised_Attnunet_model
+#         keras.clear_session()
+#         gc.collect()
+
+#         hist = pd.DataFrame(history.history)
+#         hist.to_excel(histpath)
+
+
+
 
 print("TRAIN COMPLETE")
